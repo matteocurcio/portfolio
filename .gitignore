@@ -1,0 +1,13 @@
+# Personal portfolio data — real holdings, never commit
+portfolio-data.json
+portfolio-data*.json
+portfolio-20*.json
+
+# Wrangler local state (contains Cloudflare account id + email)
+.wrangler/
+
+# Pre-migration backup, see DESIGN-SYSTEM.md
+index.html.pre-code-migration
+
+# macOS
+.DS_Store

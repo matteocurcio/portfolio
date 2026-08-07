@@ -1,0 +1,8 @@
+name = "portfolio-quotes"
+main = "src/index.js"
+compatibility_date = "2024-01-01"
+
+# Bind the quote API to your domain so the app can call /api/quote same-origin.
+routes = [
+  { pattern = "portfolio.matteocurcio.com/api/*", zone_name = "matteocurcio.com" }
+]

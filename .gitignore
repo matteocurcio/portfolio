@@ -11,3 +11,7 @@ index.html.pre-code-migration
 
 # macOS
 .DS_Store
+
+# Local Worker vars (DEV_OPEN=1 opens the Access gate locally)
+.dev.vars
+.dev.vars.*

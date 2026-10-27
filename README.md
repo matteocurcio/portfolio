@@ -1,8 +1,8 @@
 # portfolio-tracker
 
-A single-page holdings tracker for stocks and ETFs, with live quotes served by a
-Cloudflare Worker. No build step, no framework, no backend database — the app is one
-HTML file and your data stays in the browser.
+A single-page holdings tracker for stocks and ETFs. One Cloudflare Worker serves the page,
+live quotes and the portfolio data, which lives in D1 (the shared `app-data` database).
+The whole site sits behind Cloudflare Access. No build step, no framework.
 
 Runs at [portfolio.matteocurcio.com](https://portfolio.matteocurcio.com).
 
@@ -18,36 +18,55 @@ Runs at [portfolio.matteocurcio.com](https://portfolio.matteocurcio.com).
 
 | Path | What it is |
 | --- | --- |
-| `index.html` | The whole app — markup, styles and logic in one file. |
-| `site/index.html` | Deploy copy served by Cloudflare Pages. |
-| `src/index.js` | Worker backing `/api/quote`, deployed via `wrangler.toml`. |
-| `quote-worker.js` | Earlier standalone version of the quote worker. |
+| `site/index.html` | The whole app: markup, styles and logic in one file. Bundled into the Worker as text. |
+| `index.html` | Copy of `site/index.html`; keep the two identical. |
+| `src/index.js` | Worker: Access gate, page, `/api/quote`, `/api/state`. |
+| `src/access.js` | Access JWT check, same code as bill and inventory. Fails closed. |
+| `migrations/` | D1 schema. Tables are prefixed `portfolio_`. |
+| `wrangler.jsonc` | Worker `portfolio`, custom domain, D1 binding, Access vars. |
+| `deployment/access.json` | The Access application this Worker trusts. |
 | `DESIGN-SYSTEM.md` | Design tokens and the notes from the Code design-system migration. |
 
-## Running it
+## Endpoints
 
-The app is static, so anything that serves a file will do:
+- `GET /api/quote?symbol=X` or `?symbols=X,Y` — live prices from Yahoo Finance, cached 60 s, max 50 symbols.
+- `GET /api/state` — `{ doc, version }`; `doc` is null until the first save.
+- `PUT /api/state` with `{ version, doc }` — saves when `version` is still current, otherwise
+  `409` with the stored copy. Every replaced copy goes to `portfolio_history` (last 200 kept).
 
-```bash
-python3 -m http.server 8000
-```
+## Storage
 
-Live quotes need the worker. Deploy it once:
+Data lives in D1 `app-data` (shared with bill, expenses, recipes, scripts and shortcuts):
+
+- `portfolio_state` — one row, the whole portfolio as JSON, with a version number.
+- `portfolio_history` — previous versions, for undoing a bad edit:
+  `SELECT version, saved_at FROM portfolio_history ORDER BY id DESC LIMIT 20;`
+
+The Worker creates both tables on first use; `migrations/0001_portfolio.sql` is the same SQL for
+`wrangler d1 migrations apply app-data --remote`. The browser keeps a cache in localStorage so the page
+draws instantly and edits made offline are sent on the next save. The first time a browser that still
+holds the old local-only data opens the app and the database is empty, it uploads that data.
+Export/Import JSON still works as a manual backup.
+
+## Access
+
+`portfolio.matteocurcio.com` is a self-hosted Access application using the reusable policy `me`
+(details in `deployment/access.json`). The Worker also verifies the `Cf-Access-Jwt-Assertion` token
+against `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD`, so a missing or misconfigured Access app means no data
+rather than open data. `workers_dev` and preview URLs are off: the custom domain is the only way in.
+
+## Deploy
 
 ```bash
 npx wrangler deploy
 ```
 
-Then add the route `portfolio.matteocurcio.com/api/*` under Workers → Settings →
-Domains & Routes. The app already calls `/api/quote`, so nothing else needs configuring.
-Quotes are cached for 60 seconds and the worker accepts up to 50 symbols per batch.
+Local: put `DEV_OPEN=1` in `.dev.vars` (never in production), then `npx wrangler dev`.
 
 ## Your data
 
-Portfolio data is personal, so it is **not** in this repo — `.gitignore` excludes
-`portfolio-*.json`. Transactions live in browser storage and are exported and imported as
-JSON from the app itself. If you fork this, keep it that way: once real holdings land in
-git history they're very hard to remove.
+Portfolio data is personal, so it is **not** in this repo: `.gitignore` excludes `portfolio-*.json`
+and this repo is public. Holdings live only in D1.
 
 ## Design
 

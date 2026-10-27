@@ -111,6 +111,8 @@
   .toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(20px);background:var(--panel2);
     border:1px solid var(--line);padding:12px 20px;border-radius:12px;box-shadow:var(--shadow);opacity:0;
     transition:.25s;pointer-events:none;font-size:14px;z-index:60}
+  .sync{font-family:var(--mono,"JetBrains Mono",monospace);font-size:11px;color:var(--muted)}
+  .sync.err{color:var(--red)}
   .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
   @media(max-width:900px){.cards{grid-template-columns:repeat(2,1fr)}.grid2{grid-template-columns:1fr}}
 </style>
@@ -124,11 +126,11 @@
   <header class="top">
     <div class="brand">
       <div class="logo">P</div>
-      <div><h1>Portfolio</h1><p id="subtitle">Personal holdings tracker</p></div>
+      <div><h1>Portfolio</h1><p><span id="subtitle">Personal holdings tracker</span> <span id="sync" class="sync"></span></p></div>
     </div>
     <div class="toolbar">
       <select id="currency" class="btn" title="Display currency">
-        <option value="EUR">€ EUR</option><option value="USD">$ USD</option><option value="GBP">£ GBP</option><option value="AUD">A$ AUD</option>
+        <option value="AUD">A$ AUD</option><option value="USD">$ USD</option><option value="EUR">€ EUR</option><option value="GBP">£ GBP</option>
       </select>
       <button class="btn" id="liveBtn" title="Fetch latest market prices">↻ Refresh prices</button>
       <button class="btn" id="snapBtn" title="Record today's value">＋ Snapshot</button>
@@ -198,9 +200,12 @@
 <script>
 const STORE_KEY = "portfolio_v1";
 const CCY = {EUR:"€",USD:"$",GBP:"£",AUD:"A$"};
-// Yahoo FX symbols: price = units of target currency per 1 EUR (base)
-const FX_SYM = {USD:"EURUSD=X",GBP:"EURGBP=X",AUD:"EURAUD=X"};
-function rate(){return (state.fxRates&&state.fxRates[state.currency])||1;}
+// Base currency is AUD: transaction prices are stored in AUD.
+// Yahoo FX symbols: price = units of target currency per 1 AUD (base)
+const BASE = "AUD";
+const FX_SYM = {USD:"AUDUSD=X",GBP:"AUDGBP=X",EUR:"AUDEUR=X"};
+function rate(){if(state.currency===BASE)return 1;
+  return (state.fxRates&&state.fxRates[state.currency])||1;}
 
 
 let state = load();
@@ -208,20 +213,73 @@ let editingId = null, formType = "buy", sortHold = {key:"value",dir:-1};
 
 function load(){
   try{const s=JSON.parse(localStorage.getItem(STORE_KEY));
-    if(s&&s.tx) return s;}catch(e){}
-  return {tx:[], prices:{}, names:{}, snapshots:[], currency:"EUR"};
+    if(s&&s.tx){
+      // Pre-rebase saves hold EUR-based rates (AUD ~1.62). Base is now AUD, so drop them.
+      if(s.fxRates && s.fxRates[BASE]!==1) delete s.fxRates;
+      return s;
+    }}catch(e){}
+  return {tx:[], prices:{}, names:{}, snapshots:[], currency:BASE};
 }
-function save(){localStorage.setItem(STORE_KEY,JSON.stringify(state));}
+// ---- storage: Cloudflare D1 (shared app-data database) via /api/state ----
+// The server copy is the source of truth. localStorage is only a cache so the page
+// draws instantly and survives a dropped connection; unsent edits retry on the next save.
+const STATE_API = "/api/state";
+let serverVersion = +(localStorage.getItem(STORE_KEY+"_ver")||0), dirty = localStorage.getItem(STORE_KEY+"_dirty")==="1";
+let saveT = null, saving = false;
+function cache(){try{localStorage.setItem(STORE_KEY,JSON.stringify(state));
+  localStorage.setItem(STORE_KEY+"_ver",String(serverVersion));localStorage.setItem(STORE_KEY+"_dirty",dirty?"1":"0");}catch(e){}}
+function syncMsg(t,err){const el=$("#sync");if(el){el.textContent=t?"· "+t:"";el.className="sync"+(err?" err":"");}}
+function save(){dirty=true;cache();clearTimeout(saveT);saveT=setTimeout(push,600);}
+async function api(method,body){
+  const r=await fetch(STATE_API,{method,credentials:"same-origin",cache:"no-store",redirect:"manual",
+    headers:body?{"Content-Type":"application/json"}:{},body:body?JSON.stringify(body):undefined});
+  if(r.type==="opaqueredirect"||r.status===401||r.status===403){const e=new Error("signed out");e.auth=true;throw e;}
+  return r;
+}
+async function push(){
+  if(saving){clearTimeout(saveT);saveT=setTimeout(push,600);return;}
+  saving=true;syncMsg("saving…");
+  try{
+    const r=await api("PUT",{version:serverVersion,doc:state});
+    if(r.status===409){const j=await r.json();
+      state=normalise(j.doc);serverVersion=j.version;dirty=false;cache();render();
+      toast("Changed on another device. Loaded the latest copy; redo your last edit.");syncMsg("synced");return;}
+    if(!r.ok)throw new Error("HTTP "+r.status);
+    const j=await r.json();serverVersion=j.version;dirty=false;cache();syncMsg("synced");
+  }catch(e){syncMsg(e.auth?"signed out, reload to sign in":"offline, will retry",true);}
+  finally{saving=false;}
+}
+function normalise(s){
+  if(!s||!s.tx)return {tx:[], prices:{}, names:{}, snapshots:[], currency:BASE};
+  if(s.fxRates && s.fxRates[BASE]!==1) delete s.fxRates;
+  s.prices=s.prices||{};s.names=s.names||{};s.snapshots=s.snapshots||[];s.currency=s.currency||BASE;
+  return s;
+}
+async function pull(){
+  syncMsg("loading…");
+  try{
+    const r=await api("GET");if(!r.ok)throw new Error("HTTP "+r.status);
+    const j=await r.json();
+    if(!j.doc){ // nothing stored yet: first run on D1, upload this browser's data
+      if(state.tx.length){serverVersion=0;await push();toast("Moved this browser's data to the cloud");}
+      else syncMsg("synced");
+      return;
+    }
+    if(dirty && j.version===serverVersion){await push();return;} // offline edits on top of the latest copy
+    if(dirty) toast("Edits made offline were older than the cloud copy and were not kept");
+    state=normalise(j.doc);serverVersion=j.version;dirty=false;cache();render();syncMsg("synced");
+  }catch(e){syncMsg(e.auth?"signed out, reload to sign in":"offline, showing cached copy",true);}
+}
 
 const $=s=>document.querySelector(s);
 const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,7);
-function fmt(n){const c=CCY[state.currency]||"€";
+function fmt(n){const c=CCY[state.currency]||CCY[BASE];
   if(n===null||isNaN(n))return "—";
   return c+" "+(n*rate()).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});}
 function fmtNum(n){return n.toLocaleString(undefined,{maximumFractionDigits:4});}
 function pct(n){return (n>=0?"+":"")+n.toFixed(2)+"%";}
 function cls(n){return n>0?"pos":n<0?"neg":"";}
-function sign(n){return (n>=0?"+":"")+fmt(Math.abs(n)).replace(CCY[state.currency]||"€",(n<0?"-"+(CCY[state.currency]||"€"):(CCY[state.currency]||"€")));}
+function sign(n){return (n>=0?"+":"")+fmt(Math.abs(n)).replace(CCY[state.currency]||CCY[BASE],(n<0?"-"+(CCY[state.currency]||CCY[BASE]):(CCY[state.currency]||CCY[BASE])));}
 
 // ---- core computation: derive holdings from transactions (avg cost) ----
 function compute(){
@@ -365,7 +423,7 @@ function renderCharts(r){
       fill:true,tension:.3,pointRadius:snaps.length<30?3:0,pointBackgroundColor:css("--c-green")}]},
     options:{plugins:{legend:{display:false}},
       scales:{x:{ticks:{color:css("--c-sub"),maxTicksLimit:7},grid:{color:css("--c-border")}},
-        y:{ticks:{color:css("--c-sub"),callback:v=>(CCY[state.currency]||"€")+v.toLocaleString()},grid:{color:css("--c-border")}}}}});
+        y:{ticks:{color:css("--c-sub"),callback:v=>(CCY[state.currency]||CCY[BASE])+v.toLocaleString()},grid:{color:css("--c-border")}}}}});
   if(!snaps.length){
     lc.fillStyle=css("--c-sub");lc.font='13px "JetBrains Mono",monospace';lc.textAlign="center";
     lc.fillText("Click ＋ Snapshot to start tracking value over time",lc.canvas.width/2/2,80);
@@ -442,7 +500,8 @@ async function fetchQuote(sym){
   return null;
 }
 async function fetchFX(){
-  state.fxRates=state.fxRates||{EUR:1};
+  state.fxRates=state.fxRates||{};
+  state.fxRates[BASE]=1;
   for(const ccy of Object.keys(FX_SYM)){
     const px=await fetchQuote(FX_SYM[ccy]);
     if(px!=null) state.fxRates[ccy]=+px.toFixed(6);
@@ -476,7 +535,7 @@ function exportData(){
 function importData(file){
   const fr=new FileReader();
   fr.onload=()=>{try{const d=JSON.parse(fr.result);
-    if(!d.tx)throw 0;state={tx:d.tx,prices:d.prices||{},names:d.names||{},snapshots:d.snapshots||[],currency:d.currency||"EUR"};
+    if(!d.tx)throw 0;state=normalise({tx:d.tx,prices:d.prices||{},names:d.names||{},snapshots:d.snapshots||[],currency:d.currency||BASE});
     save();render();toast("Imported");}catch(e){toast("Invalid file");}};
   fr.readAsText(file);
 }
@@ -497,13 +556,15 @@ $("#exportBtn").onclick=exportData;
 $("#importBtn").onclick=()=>$("#fileInput").click();
 $("#fileInput").onchange=e=>{if(e.target.files[0])importData(e.target.files[0]);e.target.value="";};
 $("#currency").onchange=async e=>{state.currency=e.target.value;save();
-  if(state.currency!=="EUR" && !(state.fxRates&&state.fxRates[state.currency])){toast("Fetching FX rate…");await fetchFX();}
+  if(state.currency!==BASE && !(state.fxRates&&state.fxRates[state.currency])){toast("Fetching FX rate…");await fetchFX();}
   render();};
 $("#modal").onclick=e=>{if(e.target.id==="modal")closeModal();};
 document.addEventListener("keydown",e=>{if(e.key==="Escape")closeModal();
   if(e.key==="Enter"&&$("#modal").classList.contains("show"))saveTx();});
 
 render();
+pull();
+window.addEventListener("online",()=>{if(dirty)push();});
 </script>
 </body>
 </html>

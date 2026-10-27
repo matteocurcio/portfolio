@@ -1,0 +1,9 @@
+{
+  "id": "9785c0ed-fab5-4b2b-8019-75eb37f696f6",
+  "domain": "portfolio.matteocurcio.com",
+  "aud": "1245f842215164d82ad9946346224a4111ef8900b7c17eb0d7795c3c9a3ff4ca",
+  "policy_id": "10c2e73a-27ea-478f-81ea-1083a249ef9a",
+  "policy_name": "me",
+  "allowed_email": "matteo.curcio@gmail.com",
+  "session_duration": "24h"
+}

@@ -1,0 +1,37 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "portfolio",
+  "main": "src/index.js",
+  "compatibility_date": "2026-10-20",
+
+  // No workers.dev hostname and no preview URLs. The only way in is the
+  // custom domain, which sits behind Cloudflare Access.
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [{ "pattern": "portfolio.matteocurcio.com", "custom_domain": true }],
+
+  // The page is site/index.html, bundled into the Worker as text (wrangler's default
+  // rule for .html), so the page shell goes through the same Access check as /api.
+
+  // Shared app-data database (also used by bill, expenses, recipes, scripts, shortcuts).
+  // Every table is prefixed portfolio_; migrations are tracked in their own table.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "migrations_table": "portfolio_migrations",
+      "database_name": "app-data",
+      "database_id": "ec0bc611-96a7-49bc-9696-215617b33176"
+    }
+  ],
+
+  // Not secrets: a team name and an audience tag identify the Access application.
+  // In version control so a redeploy from a clean checkout cannot lose the auth gate.
+  "vars": {
+    "ACCESS_TEAM_DOMAIN": "throbbing-disk-e054",
+    // Application Audience (AUD) tag of the portfolio.matteocurcio.com Access app
+    // (id 9785c0ed-fab5-4b2b-8019-75eb37f696f6, reusable policy "me").
+    "ACCESS_AUD": "1245f842215164d82ad9946346224a4111ef8900b7c17eb0d7795c3c9a3ff4ca"
+  },
+
+  "observability": { "enabled": true }
+}

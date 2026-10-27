@@ -1,34 +1,50 @@
 /**
- * Cloudflare Worker — portfolio quote endpoint.
+ * portfolio.matteocurcio.com — one Worker for the whole app.
  *
- * Fetches live prices from Yahoo Finance server-side, so the browser never
- * hits a CORS wall and you don't depend on public proxies.
+ *   /                 the page (site/index.html, bundled as text)
+ *   /api/quote        live prices from Yahoo Finance, server-side (no CORS, no public proxies)
+ *   /api/state        GET / PUT the portfolio document, stored in D1 (shared app-data database)
  *
- * Endpoints:
- *   GET /api/quote?symbol=SGLE.MI            -> { symbol, price, currency, time }
- *   GET /api/quote?symbols=SGLE.MI,AEGE.MI   -> { quotes: { "SGLE.MI": {...}, ... } }
- *
- * Deploy (one time):
- *   1. npm i -g wrangler && wrangler login
- *   2. Put this file at src/index.js, add the wrangler.toml below.
- *   3. wrangler deploy
- *   4. In Cloudflare dash > Workers > your worker > Settings > Domains & Routes,
- *      add route:  portfolio.matteocurcio.com/api/*
- *   The app already calls /api/quote, so no further config is needed.
- *
- * wrangler.toml:
- *   name = "portfolio-quotes"
- *   main = "src/index.js"
- *   compatibility_date = "2024-01-01"
+ * Every request, the page included, passes the Cloudflare Access check first and fails closed
+ * (src/access.js, same code as bill and inventory). There is no workers.dev or preview URL.
  */
+import PAGE from "../site/index.html";
+import { verifyAccess } from "./access.js";
 
 const YF = "https://query1.finance.yahoo.com/v8/finance/chart/";
-const CACHE_SECONDS = 60; // be gentle on Yahoo; quotes are fine 1 min stale
+const CACHE_SECONDS = 60; // quotes are fine 1 min stale
+const HISTORY_KEEP = 200;
+const MAX_DOC_BYTES = 2_000_000;
 
+const SCHEMA = [
+  `CREATE TABLE IF NOT EXISTS portfolio_state (id INTEGER PRIMARY KEY CHECK (id = 1), doc TEXT NOT NULL, version INTEGER NOT NULL, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_by TEXT NOT NULL DEFAULT '')`,
+  `CREATE TABLE IF NOT EXISTS portfolio_history (id INTEGER PRIMARY KEY AUTOINCREMENT, version INTEGER NOT NULL, doc TEXT NOT NULL, saved_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, saved_by TEXT NOT NULL DEFAULT '')`,
+];
+let schemaReady = false;
+async function ensureSchema(db) {
+  if (schemaReady) return;
+  await db.batch(SCHEMA.map((s) => db.prepare(s)));
+  schemaReady = true;
+}
+
+const SECURITY = {
+  "X-Content-Type-Options": "nosniff",
+  "Referrer-Policy": "same-origin",
+  "X-Frame-Options": "DENY",
+};
+
+function json(body, status = 200, extra = {}) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-store", ...SECURITY, ...extra },
+  });
+}
+
+// ---------- quotes ----------
 async function getQuote(symbol) {
   const url = YF + encodeURIComponent(symbol) + "?interval=1d&range=1d";
   const res = await fetch(url, {
-    headers: { "User-Agent": "Mozilla/5.0", "Accept": "application/json" },
+    headers: { "User-Agent": "Mozilla/5.0", Accept: "application/json" },
     cf: { cacheTtl: CACHE_SECONDS, cacheEverything: true },
   });
   if (!res.ok) throw new Error("yahoo " + res.status);
@@ -39,36 +55,90 @@ async function getQuote(symbol) {
   return { symbol, price, currency: m.currency || null, time: m.regularMarketTime || null };
 }
 
-function json(body, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: {
-      "Content-Type": "application/json",
-      "Access-Control-Allow-Origin": "https://portfolio.matteocurcio.com",
-      "Cache-Control": "public, max-age=" + CACHE_SECONDS,
-    },
-  });
+async function quote(url) {
+  const cache = { "Cache-Control": "private, max-age=" + CACHE_SECONDS };
+  const multi = url.searchParams.get("symbols");
+  if (multi) {
+    const syms = multi.split(",").map((s) => s.trim()).filter(Boolean).slice(0, 50);
+    const quotes = {};
+    await Promise.all(syms.map(async (s) => {
+      try { quotes[s] = await getQuote(s); }
+      catch (e) { quotes[s] = { symbol: s, error: String(e.message || e) }; }
+    }));
+    return json({ quotes }, 200, cache);
+  }
+  const symbol = url.searchParams.get("symbol");
+  if (!symbol) return json({ error: "symbol required" }, 400);
+  try { return json(await getQuote(symbol), 200, cache); }
+  catch (e) { return json({ symbol, error: String(e.message || e) }, 502); }
+}
+
+// ---------- state ----------
+async function getState(env) {
+  await ensureSchema(env.DB);
+  const row = await env.DB.prepare("SELECT doc, version, updated_at FROM portfolio_state WHERE id = 1").first();
+  if (!row) return json({ doc: null, version: 0 });
+  return json({ doc: JSON.parse(row.doc), version: row.version, updated_at: row.updated_at });
+}
+
+async function putState(request, env, email) {
+  await ensureSchema(env.DB);
+  const text = await request.text();
+  if (text.length > MAX_DOC_BYTES) return json({ error: "document too large" }, 413);
+  let body;
+  try { body = JSON.parse(text); } catch { return json({ error: "invalid JSON" }, 400); }
+  const doc = body?.doc;
+  const base = Number(body?.version);
+  if (!doc || typeof doc !== "object" || !Array.isArray(doc.tx)) return json({ error: "doc.tx must be an array" }, 400);
+  if (!Number.isInteger(base) || base < 0) return json({ error: "version required" }, 400);
+
+  const db = env.DB;
+  const next = base + 1;
+  const docText = JSON.stringify(doc);
+  // Optimistic lock: the write lands only if the stored version is still the one the client saw.
+  const results = await db.batch([
+    db.prepare(
+      `INSERT INTO portfolio_history (version, doc, saved_by)
+       SELECT version, doc, updated_by FROM portfolio_state WHERE id = 1 AND version = ?1`).bind(base),
+    db.prepare(
+      `INSERT INTO portfolio_state (id, doc, version, updated_at, updated_by)
+       SELECT 1, ?1, ?2, CURRENT_TIMESTAMP, ?3
+       WHERE (?4 = 0 AND NOT EXISTS (SELECT 1 FROM portfolio_state WHERE id = 1))
+          OR EXISTS (SELECT 1 FROM portfolio_state WHERE id = 1 AND version = ?4)
+       ON CONFLICT (id) DO UPDATE SET doc = excluded.doc, version = excluded.version,
+         updated_at = excluded.updated_at, updated_by = excluded.updated_by`).bind(docText, next, email, base),
+    db.prepare(
+      `DELETE FROM portfolio_history WHERE id NOT IN (SELECT id FROM portfolio_history ORDER BY id DESC LIMIT ?1)`).bind(HISTORY_KEEP),
+  ]);
+  if (results[1].meta.changes === 0) {
+    const row = await db.prepare("SELECT doc, version FROM portfolio_state WHERE id = 1").first();
+    return json({ error: "version conflict", doc: row ? JSON.parse(row.doc) : null, version: row ? row.version : 0 }, 409);
+  }
+  return json({ ok: true, version: next });
 }
 
 export default {
-  async fetch(request) {
-    const { searchParams, pathname } = new URL(request.url);
-    if (!pathname.endsWith("/quote")) return json({ error: "not found" }, 404);
+  async fetch(request, env) {
+    const auth = await verifyAccess(request, env);
+    if (!auth.ok) return json({ error: auth.message }, auth.status);
 
-    const multi = searchParams.get("symbols");
-    if (multi) {
-      const syms = multi.split(",").map(s => s.trim()).filter(Boolean).slice(0, 50);
-      const quotes = {};
-      await Promise.all(syms.map(async s => {
-        try { quotes[s] = await getQuote(s); }
-        catch (e) { quotes[s] = { symbol: s, error: String(e.message || e) }; }
-      }));
-      return json({ quotes });
+    const url = new URL(request.url);
+    const { pathname } = url;
+    try {
+      if (pathname === "/api/quote") return quote(url);
+      if (pathname === "/api/state") {
+        if (request.method === "GET") return await getState(env);
+        if (request.method === "PUT") return await putState(request, env, auth.email);
+        return json({ error: "method not allowed" }, 405, { Allow: "GET, PUT" });
+      }
+      if (pathname.startsWith("/api/")) return json({ error: "not found" }, 404);
+      if (request.method !== "GET" && request.method !== "HEAD") return json({ error: "method not allowed" }, 405);
+      return new Response(PAGE, {
+        headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", ...SECURITY },
+      });
+    } catch (e) {
+      console.error(e);
+      return json({ error: "server error" }, 500);
     }
-
-    const symbol = searchParams.get("symbol");
-    if (!symbol) return json({ error: "symbol required" }, 400);
-    try { return json(await getQuote(symbol)); }
-    catch (e) { return json({ symbol, error: String(e.message || e) }, 502); }
   },
 };

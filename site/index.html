@@ -157,7 +157,7 @@
 
   <div class="grid2">
     <div class="panel">
-      <h2>Portfolio value over time</h2>
+      <h2 id="lineTitle">Portfolio value over time</h2>
       <canvas id="lineChart" height="150"></canvas>
     </div>
     <div class="panel">
@@ -375,12 +375,14 @@ function dailySeries(){
       h[k].px=p;}
     for(const [sym,list] of Object.entries(hist.closes)){let i=idx[sym]||0;
       while(i<list.length&&list[i][0]<=d){last[sym]=list[i][1];i++;} idx[sym]=i;}
-    let value=0,cost=0;
+    let value=0,cost=0; const by={};
     for(const [k,x] of Object.entries(h)){if(!x.shares)continue;cost+=x.cost;
-      const c=last[k]!=null?toAud(k,last[k]):null; value+=x.shares*(c!=null?c:x.px);}
-    out.push({date:d,value,cost});
+      const c=last[k]!=null?toAud(k,last[k]):null, v=x.shares*(c!=null?c:x.px);
+      value+=v; by[k]={value:v,cost:x.cost};}
+    out.push({date:d,value,cost,by});
   }
-  const r=compute(); out.push({date:today,value:r.mv,cost:r.cost});
+  const r=compute(), by={};r.holdings.forEach(x=>by[x.ticker]={value:x.mv,cost:x.cost});
+  out.push({date:today,value:r.mv,cost:r.cost,by});
   return out;
 }
 // ---- render ----
@@ -480,7 +482,7 @@ function renderCharts(r){
   if(pieChart)pieChart.destroy();
   if(hs.length){
     pieChart=new Chart(pc,{type:"doughnut",data:{labels,datasets:[{data,backgroundColor:colors,borderColor:css("--c-panel"),borderWidth:2}]},
-      options:{cutout:"62%",plugins:{
+      options:{cutout:"62%",onHover:(e,els)=>setFocus(els.length?hs[els[0].index].ticker:null),plugins:{
         legend:{position:"right",labels:{color:css("--c-ink"),boxWidth:12,font:{size:12},
           generateLabels:ch=>hs.map((h,i)=>({text:h.ticker+"  "+classLabel(h.cls),fillStyle:colors[i],strokeStyle:colors[i],
             fontColor:css("--c-ink"),index:i,hidden:!ch.getDataVisibility(i)}))}},
@@ -488,24 +490,52 @@ function renderCharts(r){
           return [h.ticker+" · "+fmt(h.mv)+" ("+(h.mv/r.mv*100).toFixed(1)+"%)", classLabel(h.cls)+" "+clsPct[h.cls].toFixed(1)+"% of portfolio"];}}}}}});
   }
   // line
-  const lc=$("#lineChart").getContext("2d");
-  const series=dailySeries();
-  const snaps=series.length>1?series:[...state.snapshots].sort((a,b)=>a.date.localeCompare(b.date));
+  lineSeries=dailySeries();
+  if(focusTicker&&!r.holdings.some(h=>h.ticker===focusTicker))focusTicker=null;
+  drawLine(true);
+}
+
+// Value chart. With a slice hovered in the allocation ring it shows that holding alone,
+// its axis fitted to the holding's own range; otherwise the whole portfolio.
+let lineSeries=[], focusTicker=null, focusT=null;
+function lineData(){
+  const css=v=>getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+  if(focusTicker&&lineSeries.length>1){
+    const k=focusTicker, c=classOf(k), pts=lineSeries.map(p=>p.by&&p.by[k]);
+    return {title:k+" · "+classLabel(c)+(state.names[k]?" · "+state.names[k]:""), color:classColor(c), fillA:classColor(c,.22),
+      labels:lineSeries.map(p=>p.date), value:pts.map(x=>x?+(x.value*rate()).toFixed(2):null),
+      cost:pts.map(x=>x?+(x.cost*rate()).toFixed(2):null)};
+  }
+  const pts=lineSeries.length>1?lineSeries:[...state.snapshots].sort((a,b)=>a.date.localeCompare(b.date));
+  const g=css("--c-green"), v=g.replace("#","");
+  return {title:"Portfolio value over time", color:g, fillA:`rgba(${parseInt(v.slice(0,2),16)},${parseInt(v.slice(2,4),16)},${parseInt(v.slice(4,6),16)},.22)`,
+    labels:pts.map(p=>p.date), value:pts.map(p=>+(p.value*rate()).toFixed(2)),
+    cost:lineSeries.length>1?lineSeries.map(p=>+(p.cost*rate()).toFixed(2)):null};
+}
+function drawLine(rebuild){
+  const css=v=>getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+  const lc=$("#lineChart").getContext("2d"), d=lineData();
+  $("#lineTitle").textContent=d.title;
+  const grad=lc.createLinearGradient(0,0,0,260);grad.addColorStop(0,d.fillA);grad.addColorStop(1,"rgba(0,0,0,0)");
+  const sets=[{label:"Value",data:d.value,borderColor:d.color,backgroundColor:grad,fill:true,tension:.3,
+      pointRadius:d.value.length<30?3:0,pointBackgroundColor:d.color,spanGaps:false},
+    ...(d.cost?[{label:"Cost",data:d.cost,borderColor:css("--c-sub"),borderDash:[4,4],borderWidth:1,pointRadius:0,fill:false,tension:0}]:[])];
+  if(lineChart&&!rebuild){lineChart.data.labels=d.labels;lineChart.data.datasets=sets;lineChart.update();return;}
   if(lineChart)lineChart.destroy();
-  const grad=lc.createLinearGradient(0,0,0,200);
-  grad.addColorStop(0,"rgba(91,140,255,.35)");grad.addColorStop(1,"rgba(91,140,255,0)");
-  lineChart=new Chart(lc,{type:"line",data:{labels:snaps.map(s=>s.date),
-    datasets:[{label:"Value",data:snaps.map(s=>+(s.value*rate()).toFixed(2)),borderColor:css("--c-green"),backgroundColor:grad,
-      fill:true,tension:.3,pointRadius:snaps.length<30?3:0,pointBackgroundColor:css("--c-green")},
-      ...(series.length>1?[{label:"Cost",data:series.map(s=>+(s.cost*rate()).toFixed(2)),borderColor:css("--c-sub"),
-        borderDash:[4,4],borderWidth:1,pointRadius:0,fill:false,tension:0}]:[])]},
-    options:{plugins:{legend:{display:false},tooltip:{mode:"index",intersect:false}},interaction:{mode:"index",intersect:false},
+  lineChart=new Chart(lc,{type:"line",data:{labels:d.labels,datasets:sets},
+    options:{animation:{duration:250},plugins:{legend:{display:false},tooltip:{mode:"index",intersect:false}},interaction:{mode:"index",intersect:false},
       scales:{x:{ticks:{color:css("--c-sub"),maxTicksLimit:7},grid:{color:css("--c-border")}},
-        y:{ticks:{color:css("--c-sub"),callback:v=>(CCY[state.currency]||CCY[BASE])+v.toLocaleString()},grid:{color:css("--c-border")}}}}});
-  if(!snaps.length){
+        y:{grace:"5%",ticks:{color:css("--c-sub"),callback:v=>(CCY[state.currency]||CCY[BASE])+v.toLocaleString()},grid:{color:css("--c-border")}}}}});
+  if(!d.value.length){
     lc.fillStyle=css("--c-sub");lc.font='13px "JetBrains Mono",monospace';lc.textAlign="center";
     lc.fillText("Add a transaction to start tracking value over time",lc.canvas.width/2/2,80);
   }
+}
+function setFocus(t){
+  clearTimeout(focusT);
+  // leaving a slice waits a moment, so sliding between slices doesn't flash the portfolio view
+  focusT=setTimeout(()=>{if(t!==focusTicker){focusTicker=t;drawLine(false);}},t?0:150);
+
 }
 
 function snapshot(silent){
@@ -643,6 +673,7 @@ $("#cancelBtn").onclick=closeModal;
 $("#saveBtn").onclick=saveTx;
 $("#segBuy").onclick=()=>{formType="buy";setSeg();};
 $("#segSell").onclick=()=>{formType="sell";setSeg();};
+$("#pieChart").addEventListener("mouseleave",()=>setFocus(null));
 $("#segDiv").onclick=()=>{formType="dividend";setSeg();};
 $("#fTicker").addEventListener("input",fillClass);
 $("#liveBtn").onclick=refreshPrices;

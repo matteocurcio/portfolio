@@ -31,6 +31,7 @@ Runs at [portfolio.matteocurcio.com](https://portfolio.matteocurcio.com).
 
 - `GET /api/quote?symbol=X` or `?symbols=X,Y` — live prices from Yahoo Finance, cached 60 s, max 50 symbols.
 - `GET /api/state` — `{ doc, version }`; `doc` is null until the first save.
+- `GET|POST /api/archive` — list or add a reference copy (`{ label, note, doc }`).
 - `PUT /api/state` with `{ version, doc }` — saves when `version` is still current, otherwise
   `409` with the stored copy. Every replaced copy goes to `portfolio_history` (last 200 kept).
 
@@ -39,13 +40,15 @@ Runs at [portfolio.matteocurcio.com](https://portfolio.matteocurcio.com).
 Data lives in D1 `app-data` (shared with bill, expenses, recipes, scripts and shortcuts):
 
 - `portfolio_state` — one row, the whole portfolio as JSON, with a version number.
+- `portfolio_archive` — old exports kept for reference, never live: the EUR-based history from before the
+  AUD rebase (`portfolio-2026-06-12.json`). `GET /api/archive` lists them, `?id=N` returns one.
 - `portfolio_history` — previous versions, for undoing a bad edit:
   `SELECT version, saved_at FROM portfolio_history ORDER BY id DESC LIMIT 20;`
 
 The Worker creates both tables on first use; `migrations/0001_portfolio.sql` is the same SQL for
 `wrangler d1 migrations apply app-data --remote`. The browser keeps a cache in localStorage so the page
-draws instantly and edits made offline are sent on the next save. The first time a browser that still
-holds the old local-only data opens the app and the database is empty, it uploads that data.
+draws instantly and edits made offline are sent on the next save. A browser's old local-only data is
+never uploaded automatically; an empty database is filled on purpose with Import.
 Export/Import JSON still works as a manual backup.
 
 ## Access

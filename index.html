@@ -260,9 +260,9 @@ async function pull(){
   try{
     const r=await api("GET");if(!r.ok)throw new Error("HTTP "+r.status);
     const j=await r.json();
-    if(!j.doc){ // nothing stored yet: first run on D1, upload this browser's data
-      if(state.tx.length){serverVersion=0;await push();toast("Moved this browser's data to the cloud");}
-      else syncMsg("synced");
+    if(!j.doc){ // nothing stored yet. Never upload a browser's leftover copy automatically:
+      // seed the database on purpose with Import instead.
+      state=normalise(null);serverVersion=0;dirty=false;cache();render();syncMsg("empty, use Import to load data");
       return;
     }
     if(dirty && j.version===serverVersion){await push();return;} // offline edits on top of the latest copy

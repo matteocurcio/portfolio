@@ -16,3 +16,13 @@ CREATE TABLE IF NOT EXISTS portfolio_history (
   saved_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   saved_by   TEXT NOT NULL DEFAULT ''
 );
+-- Old exports kept for reference (e.g. the EUR-based history from before the AUD rebase).
+-- Never loaded as live data. GET /api/archive lists them, GET /api/archive?id=N returns one.
+CREATE TABLE IF NOT EXISTS portfolio_archive (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  label      TEXT NOT NULL UNIQUE,
+  doc        TEXT NOT NULL,
+  note       TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  created_by TEXT NOT NULL DEFAULT ''
+);

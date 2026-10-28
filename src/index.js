@@ -4,6 +4,7 @@
  *   /                 the page (site/index.html, bundled as text)
  *   /api/quote        live prices from Yahoo Finance, server-side (no CORS, no public proxies)
  *   /api/state        GET / PUT the portfolio document, stored in D1 (shared app-data database)
+ *   /api/archive      GET lists archived documents (old exports kept for reference), POST adds one
  *
  * Every request, the page included, passes the Cloudflare Access check first and fails closed
  * (src/access.js, same code as bill and inventory). There is no workers.dev or preview URL.
@@ -19,6 +20,7 @@ const MAX_DOC_BYTES = 2_000_000;
 const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS portfolio_state (id INTEGER PRIMARY KEY CHECK (id = 1), doc TEXT NOT NULL, version INTEGER NOT NULL, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_by TEXT NOT NULL DEFAULT '')`,
   `CREATE TABLE IF NOT EXISTS portfolio_history (id INTEGER PRIMARY KEY AUTOINCREMENT, version INTEGER NOT NULL, doc TEXT NOT NULL, saved_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, saved_by TEXT NOT NULL DEFAULT '')`,
+  `CREATE TABLE IF NOT EXISTS portfolio_archive (id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT NOT NULL UNIQUE, doc TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, created_by TEXT NOT NULL DEFAULT '')`,
 ];
 let schemaReady = false;
 async function ensureSchema(db) {
@@ -117,6 +119,30 @@ async function putState(request, env, email) {
   return json({ ok: true, version: next });
 }
 
+// ---------- archive: old documents kept for reference, never loaded as live data ----------
+async function archive(request, env, email) {
+  await ensureSchema(env.DB);
+  if (request.method === "GET") {
+    const id = new URL(request.url).searchParams.get("id");
+    if (id) {
+      const row = await env.DB.prepare("SELECT id, label, note, created_at, doc FROM portfolio_archive WHERE id = ?1").bind(id).first();
+      return row ? json({ ...row, doc: JSON.parse(row.doc) }) : json({ error: "not found" }, 404);
+    }
+    const { results } = await env.DB.prepare("SELECT id, label, note, created_at, length(doc) AS bytes FROM portfolio_archive ORDER BY id").all();
+    return json({ archive: results });
+  }
+  if (request.method === "POST") {
+    let body;
+    try { body = JSON.parse(await request.text()); } catch { return json({ error: "invalid JSON" }, 400); }
+    const label = String(body?.label || "").trim().slice(0, 120);
+    if (!label || !body?.doc || !Array.isArray(body.doc.tx)) return json({ error: "label and doc.tx required" }, 400);
+    const r = await env.DB.prepare("INSERT OR IGNORE INTO portfolio_archive (label, doc, note, created_by) VALUES (?1, ?2, ?3, ?4)")
+      .bind(label, JSON.stringify(body.doc), String(body.note || "").slice(0, 500), email).run();
+    return json({ ok: true, added: r.meta.changes === 1 });
+  }
+  return json({ error: "method not allowed" }, 405, { Allow: "GET, POST" });
+}
+
 export default {
   async fetch(request, env) {
     const auth = await verifyAccess(request, env);
@@ -131,6 +157,7 @@ export default {
         if (request.method === "PUT") return await putState(request, env, auth.email);
         return json({ error: "method not allowed" }, 405, { Allow: "GET, PUT" });
       }
+      if (pathname === "/api/archive") return await archive(request, env, auth.email);
       if (pathname.startsWith("/api/")) return json({ error: "not found" }, 404);
       if (request.method !== "GET" && request.method !== "HEAD") return json({ error: "method not allowed" }, 405);
       return new Response(PAGE, {

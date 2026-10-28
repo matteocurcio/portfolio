@@ -22,7 +22,7 @@
     --c-shadow:rgba(0,0,0,.45);
     /* asset-class hues (allocation chart only): one hue per class, holdings in a class step its opacity */
     --c-cls-au:#e07a5f; --c-cls-us:#5b8def; --c-cls-intl:#2bb3c0; --c-cls-em:#a78bfa;
-    --c-cls-bond:#94a3b8; --c-cls-gold:#e6b422; --c-cls-other:#707070;
+    --c-cls-bond:#94a3b8; --c-cls-gold:#e6b422; --c-cls-other:#707070; --c-cls-cash:#c9c5b9;
   }
   html.theme-light{
     --c-bg:#f7f7f6; --c-panel:#ffffff; --c-panel2:#f0f0ef;
@@ -31,7 +31,7 @@
     --c-green:#16a34a; --c-green-dim:#bbf7d0; --c-danger:#dc2626;
     --c-shadow:rgba(0,0,0,.16);
     --c-cls-au:#d1603f; --c-cls-us:#2f6fe0; --c-cls-intl:#0e8f9c; --c-cls-em:#7c5cdb;
-    --c-cls-bond:#64748b; --c-cls-gold:#b8860b; --c-cls-other:#8a8a87;
+    --c-cls-bond:#64748b; --c-cls-gold:#b8860b; --c-cls-other:#8a8a87; --c-cls-cash:#9c968a;
   }
   :root{
     --sans:"Inter",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
@@ -88,7 +88,7 @@
   .pill{display:inline-block;padding:2px 9px;border-radius:20px;font-size:11px;font-weight:600}
   .pill.buy{background:rgba(39,192,138,.15);color:var(--green)}
   .pill.sell{background:rgba(255,92,108,.15);color:var(--red)}
-  .pill.dividend{background:var(--c-panel2);color:var(--c-ink);border:1px solid var(--c-border-strong)}
+  .pill.deposit,.pill.withdrawal,.pill.dividend{background:var(--c-panel2);color:var(--c-ink);border:1px solid var(--c-border-strong)}
   .cdot{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:6px;vertical-align:1px}
   .cls{font-size:11px;color:var(--muted)}
   .priceinp{width:88px;background:var(--panel2);border:1px solid var(--c-border-strong);color:var(--txt);font-family:var(--mono);border-radius:7px;
@@ -185,9 +185,11 @@
       <button id="segBuy" class="active buy" data-type="buy">Buy</button>
       <button id="segSell" data-type="sell">Sell</button>
       <button id="segDiv" data-type="dividend">Dividend</button>
+      <button id="segDep" data-type="deposit">Deposit</button>
+      <button id="segWd" data-type="withdrawal">Withdraw</button>
     </div>
     <div class="row2">
-      <div class="field"><label>Ticker</label><input id="fTicker" placeholder="AAPL" autocomplete="off"></div>
+      <div class="field" id="fTickerField"><label>Ticker</label><input id="fTicker" placeholder="AAPL" autocomplete="off"></div>
       <div class="field"><label>Date</label><input id="fDate" type="date"></div>
     </div>
     <div class="row2 trade-only">
@@ -199,7 +201,7 @@
       <div class="field"><label>Price per share</label><input id="fPrice" type="number" step="any" placeholder="150.00"></div>
     </div>
     <div class="field trade-only"><label>Fees (optional)</label><input id="fFees" type="number" step="any" placeholder="0.00"></div>
-    <div class="field div-only" style="display:none"><label>Amount received (cash, after any withholding)</label><input id="fAmount" type="number" step="any" placeholder="29.11"></div>
+    <div class="field div-only" style="display:none"><label id="fAmountLabel">Amount received (cash, after any withholding)</label><input id="fAmount" type="number" step="any" placeholder="29.11"></div>
     <div class="modal-actions">
       <button class="btn" id="cancelBtn">Cancel</button>
       <button class="btn primary" id="saveBtn">Save</button>
@@ -224,7 +226,9 @@ function rate(){if(state.currency===BASE)return 1;
 // Asset classes: each has its own hue (tokens --c-cls-*). A ticker's class is state.classes[t],
 // else the default below, else "other". Set it in the Add transaction box.
 const CLASSES=[["au","Australian equity"],["us","US equity"],["intl","Developed ex-US"],["em","Emerging markets"],
-  ["bond","Bonds"],["gold","Gold & commodities"],["other","Other"]];
+  ["bond","Bonds"],["gold","Gold & commodities"],["other","Other"],["cash","Cash"]];
+const CASH="CASH"; // pseudo-ticker for the cash balance (allocation, holdings table, chart focus)
+const CASH_TYPES=["deposit","withdrawal"];
 const DEFAULT_CLASS={"A200.AX":"au","IVV.AX":"us","EXUS.AX":"intl","VGE.AX":"em",
   "ILB.AX":"bond","VGB.AX":"bond","VBND.AX":"bond","GXLD.AX":"gold"};
 function classOf(t){return (state.classes&&state.classes[t])||DEFAULT_CLASS[t]||"other";}
@@ -312,9 +316,13 @@ function compute(){
   const byTicker={};
   const txs=[...state.tx].sort((a,b)=>a.date.localeCompare(b.date)||a._seq-b._seq);
   let realized=0;
-  let dividends=0;
+  let dividends=0, cash=0, netIn=0;
+  const hasCash=state.tx.some(t=>CASH_TYPES.includes(t.type));
   for(const t of txs){
-    if(t.type==="dividend"){dividends+=+t.amount||0;continue;}
+    if(t.type==="deposit"){cash+=+t.amount||0;netIn+=+t.amount||0;continue;}
+    if(t.type==="withdrawal"){cash-=+t.amount||0;netIn-=+t.amount||0;continue;}
+    if(t.type==="dividend"){dividends+=+t.amount||0;cash+=+t.amount||0;continue;}
+    cash+=(t.type==="buy"?-1:1)*(+t.shares*+t.price)-(+t.fees||0);
     const k=t.ticker;
     if(!byTicker[k]) byTicker[k]={ticker:k,shares:0,cost:0};
     const h=byTicker[k];
@@ -334,10 +342,14 @@ function compute(){
     const upl=mv-h.cost;
     return {...h,avg,price,mv,upl,uplPct:h.cost?upl/h.cost*100:0,name:state.names[h.ticker]||"",cls:classOf(h.ticker)};
   });
-  const mv=holdings.reduce((s,h)=>s+h.mv,0);
+  const secMv=holdings.reduce((s,h)=>s+h.mv,0);
   const cost=holdings.reduce((s,h)=>s+h.cost,0);
-  const upl=mv-cost;
-  return {holdings,mv,cost,upl,uplPct:cost?upl/cost*100:0,realized,dividends};
+  const upl=secMv-cost;
+  // Cash only exists once deposits/withdrawals are recorded; before that buys would make it negative.
+  if(hasCash) holdings.push({ticker:CASH,isCash:true,shares:0,cost:0,avg:0,price:0,mv:cash,upl:0,uplPct:0,
+    name:"AU Cash (AUD)",cls:"cash"});
+  return {holdings,secMv,mv:secMv+(hasCash?cash:0),cost,upl,uplPct:cost?upl/cost*100:0,realized,dividends,
+    hasCash,cash:hasCash?cash:0,netIn};
 }
 
 
@@ -345,8 +357,10 @@ function compute(){
 let hist=null; // {closes:{SYM:[[date,close]]}, currency:{SYM:"AUD"}}
 async function loadHistory(){
   if(!state.tx.length){hist=null;return;}
-  const syms=[...new Set(state.tx.map(t=>t.ticker))].sort();
-  const from=state.tx.map(t=>t.date).sort()[0];
+  const trades=state.tx.filter(t=>t.ticker);
+  if(!trades.length){hist=null;return;}
+  const syms=[...new Set(trades.map(t=>t.ticker))].sort();
+  const from=trades.map(t=>t.date).sort()[0];
   try{
     const r=await fetch("/api/history?from="+from+"&symbols="+encodeURIComponent(syms.join(",")),{cache:"no-store",redirect:"manual"});
     if(!r.ok)return;
@@ -359,7 +373,8 @@ function dailySeries(){
   if(!hist||!hist.closes)return [];
   const txs=[...state.tx].sort((a,b)=>a.date.localeCompare(b.date)||a._seq-b._seq);
   if(!txs.length)return [];
-  const first=txs[0].date, today=new Date().toLocaleDateString("en-CA");
+  const first=(txs.find(t=>t.type==="buy"||t.type==="sell")||txs[0]).date, today=new Date().toLocaleDateString("en-CA");
+  const hasCash=state.tx.some(t=>CASH_TYPES.includes(t.type)); let cash=0, netIn=0;
   const dates=[...new Set(Object.values(hist.closes).flat().map(c=>c[0]))].filter(d=>d>=first&&d<today).sort();
   const idx={}, last={};            // per symbol: position in its close list, last close seen
   const fxSym=c=>(c==="GBp"?"GBP":c)+"AUD=X";
@@ -368,7 +383,11 @@ function dailySeries(){
     return (c==="GBp"?v/100:v)*r;};
   const h={}; let ti=0; const out=[];
   for(const d of dates){
-    while(ti<txs.length&&txs[ti].date<=d){const t=txs[ti++];if(t.type==="dividend")continue;const k=t.ticker,q=+t.shares,p=+t.price,f=+t.fees||0;
+    while(ti<txs.length&&txs[ti].date<=d){const t=txs[ti++];
+      if(t.type==="deposit"||t.type==="withdrawal"){const a=(t.type==="deposit"?1:-1)*(+t.amount||0);cash+=a;netIn+=a;continue;}
+      if(t.type==="dividend"){cash+=+t.amount||0;continue;}
+      cash+=(t.type==="buy"?-1:1)*(+t.shares*+t.price)-(+t.fees||0);
+      const k=t.ticker,q=+t.shares,p=+t.price,f=+t.fees||0;
       h[k]=h[k]||{shares:0,cost:0,px:p};
       if(t.type==="buy"){h[k].shares+=q;h[k].cost+=q*p+f;}
       else{const avg=h[k].shares>0?h[k].cost/h[k].shares:0;h[k].cost-=avg*q;h[k].shares-=q;if(h[k].shares<1e-9){h[k].shares=0;h[k].cost=0;}}
@@ -379,10 +398,12 @@ function dailySeries(){
     for(const [k,x] of Object.entries(h)){if(!x.shares)continue;cost+=x.cost;
       const c=last[k]!=null?toAud(k,last[k]):null, v=x.shares*(c!=null?c:x.px);
       value+=v; by[k]={value:v,cost:x.cost};}
+    // With cash tracked, the portfolio line is holdings + cash and the dashed line is money put in.
+    if(hasCash){value+=cash;cost=netIn;by[CASH]={value:cash,cost:null};}
     out.push({date:d,value,cost,by});
   }
-  const r=compute(), by={};r.holdings.forEach(x=>by[x.ticker]={value:x.mv,cost:x.cost});
-  out.push({date:today,value:r.mv,cost:r.cost,by});
+  const r=compute(), by={};r.holdings.forEach(x=>by[x.ticker]={value:x.mv,cost:x.isCash?null:x.cost});
+  out.push({date:today,value:r.mv,cost:r.hasCash?r.netIn:r.cost,by});
   return out;
 }
 // ---- render ----
@@ -394,7 +415,7 @@ function render(){
     : "Personal holdings tracker";
   const r=compute();
   $("#cMV").textContent=fmt(r.mv);
-  $("#cMVsub").textContent="cost "+fmt(r.cost);
+  $("#cMVsub").textContent=r.hasCash?"holdings "+fmt(r.secMv)+" · cash "+fmt(r.cash):"cost "+fmt(r.cost);
   $("#cUPL").textContent=sign(r.upl); $("#cUPL").className="value "+cls(r.upl);
   $("#cUPLsub").textContent=pct(r.uplPct); $("#cUPLsub").className="sub "+cls(r.upl);
   const inc=r.realized+r.dividends;
@@ -402,8 +423,8 @@ function render(){
   $("#cRPLsub").textContent=!r.dividends?"from closed lots":(Math.abs(r.realized)<0.005?"dividends":"dividends "+fmt(r.dividends)+" · sales "+sign(r.realized));
   const tot=r.upl+inc;
   $("#cTOT").textContent=sign(tot); $("#cTOT").className="value "+cls(tot);
-  const totPct=r.cost?(tot/r.cost*100):0;
-  $("#cTOTsub").textContent=pct(totPct)+" on cost"; $("#cTOTsub").className="sub "+cls(tot);
+  const base=r.hasCash?r.netIn:r.cost, totPct=base?(tot/base*100):0;
+  $("#cTOTsub").textContent=pct(totPct)+(r.hasCash?" on money put in":" on cost"); $("#cTOTsub").className="sub "+cls(tot);
 
   renderHoldings(r);
   renderTx();
@@ -422,6 +443,10 @@ function renderHoldings(r){
     <th data-k="price">Price</th><th data-k="mv">Value</th><th data-k="upl">Unreal. P&L</th><th data-k="mv">Weight</th></tr></thead><tbody>`;
   for(const x of sorted){
     const wt=r.mv?x.mv/r.mv*100:0;
+    if(x.isCash){h+=`<tr>
+      <td class="l"><span class="cdot" style="background:${classColor("cash")}"></span><span class="tk">Cash</span><div class="nm">${x.name}</div><div class="cls">uninvested, from deposits, sales and dividends</div></td>
+      <td>—</td><td>—</td><td>—</td><td><b>${fmt(x.mv)}</b></td><td>—</td>
+      <td>${wt.toFixed(1)}%<div class="bar"><span style="width:${wt}%;background:${classColor("cash")}"></span></div></td></tr>`;continue;}
     h+=`<tr>
       <td class="l"><span class="cdot" style="background:${classColor(x.cls)}"></span><span class="tk">${x.ticker}</span>${x.name?`<div class="nm">${x.name}</div>`:""}<div class="cls">${classLabel(x.cls)}</div></td>
       <td>${fmtNum(x.shares)}</td>
@@ -449,14 +474,14 @@ function renderTx(){
   let h=`<table><thead><tr><th class="l">Date</th><th class="l">Type</th><th class="l">Asset</th>
     <th>Qty</th><th>Price</th><th>Fees</th><th>Total</th><th></th></tr></thead><tbody>`;
   for(const t of txs){
-    const div=t.type==="dividend";
+    const div=t.type==="dividend"||CASH_TYPES.includes(t.type);
     const total=div?(+t.amount||0):t.shares*t.price+(t.type==="buy"?1:-1)*(+t.fees||0);
     h+=`<tr>
       <td class="l">${t.date}</td>
       <td class="l"><span class="pill ${t.type}">${t.type.toUpperCase()}</span></td>
-      <td class="l"><span class="tk">${t.ticker}</span></td>
+      <td class="l"><span class="tk">${t.ticker||"Cash"}</span></td>
       <td>${div?"—":fmtNum(t.shares)}</td><td>${div?"—":fmt(t.price)}</td><td>${div?"—":fmt(+t.fees||0)}</td>
-      <td><b>${div?"+"+fmt(total):fmt(total)}</b></td>
+      <td><b>${div?(t.type==="withdrawal"?"−":"+")+fmt(total):fmt(total)}</b></td>
       <td><span class="del" data-id="${t.id}" title="Delete">✕</span></td>
     </tr>`;
   }
@@ -484,10 +509,11 @@ function renderCharts(r){
     pieChart=new Chart(pc,{type:"doughnut",data:{labels,datasets:[{data,backgroundColor:colors,borderColor:css("--c-panel"),borderWidth:2}]},
       options:{cutout:"62%",onHover:(e,els)=>setFocus(els.length?hs[els[0].index].ticker:null),plugins:{
         legend:{position:"right",labels:{color:css("--c-ink"),boxWidth:12,font:{size:12},
-          generateLabels:ch=>hs.map((h,i)=>({text:h.ticker+"  "+classLabel(h.cls),fillStyle:colors[i],strokeStyle:colors[i],
+          generateLabels:ch=>hs.map((h,i)=>({text:h.isCash?"Cash":h.ticker+"  "+classLabel(h.cls),fillStyle:colors[i],strokeStyle:colors[i],
             fontColor:css("--c-ink"),index:i,hidden:!ch.getDataVisibility(i)}))}},
         tooltip:{callbacks:{label:c=>{const h=hs[c.dataIndex];
-          return [h.ticker+" · "+fmt(h.mv)+" ("+(h.mv/r.mv*100).toFixed(1)+"%)", classLabel(h.cls)+" "+clsPct[h.cls].toFixed(1)+"% of portfolio"];}}}}}});
+          return h.isCash?["Cash · "+fmt(h.mv)+" ("+(h.mv/r.mv*100).toFixed(1)+"%)"]
+            :[h.ticker+" · "+fmt(h.mv)+" ("+(h.mv/r.mv*100).toFixed(1)+"%)", classLabel(h.cls)+" "+clsPct[h.cls].toFixed(1)+"% of portfolio"];}}}}}});
   }
   // line
   lineSeries=dailySeries();
@@ -502,9 +528,10 @@ function lineData(){
   const css=v=>getComputedStyle(document.documentElement).getPropertyValue(v).trim();
   if(focusTicker&&lineSeries.length>1){
     const k=focusTicker, c=classOf(k), pts=lineSeries.map(p=>p.by&&p.by[k]);
-    return {title:k+" · "+classLabel(c)+(state.names[k]?" · "+state.names[k]:""), color:classColor(c), fillA:classColor(c,.22),
+    const cost=pts.map(x=>x&&x.cost!=null?+(x.cost*rate()).toFixed(2):null);
+    return {title:k===CASH?"Cash balance":k+" · "+classLabel(c)+(state.names[k]?" · "+state.names[k]:""), color:classColor(c), fillA:classColor(c,.22),
       labels:lineSeries.map(p=>p.date), value:pts.map(x=>x?+(x.value*rate()).toFixed(2):null),
-      cost:pts.map(x=>x?+(x.cost*rate()).toFixed(2):null)};
+      cost:cost.some(v=>v!=null)?cost:null};
   }
   const pts=lineSeries.length>1?lineSeries:[...state.snapshots].sort((a,b)=>a.date.localeCompare(b.date));
   const g=css("--c-green"), v=g.replace("#","");
@@ -552,7 +579,7 @@ function openModal(){
   editingId=null;formType="buy";setSeg();
   $("#modalTitle").textContent="Add transaction";
   $("#fTicker").value="";$("#fName").value="";$("#fShares").value="";$("#fPrice").value="";$("#fFees").value="";$("#fAmount").value="";
-  $("#fClass").innerHTML=CLASSES.map(c=>`<option value="${c[0]}">${c[1]}</option>`).join("");fillClass();
+  $("#fClass").innerHTML=CLASSES.filter(c=>c[0]!=="cash").map(c=>`<option value="${c[0]}">${c[1]}</option>`).join("");fillClass();
   $("#fDate").value=new Date().toISOString().slice(0,10);
   $("#modal").classList.add("show");$("#fTicker").focus();
 }
@@ -561,7 +588,11 @@ function setSeg(){
   $("#segBuy").className=formType==="buy"?"active buy":"";
   $("#segSell").className=formType==="sell"?"active sell":"";
   $("#segDiv").className=formType==="dividend"?"active buy":"";
-  const div=formType==="dividend";
+  $("#segDep").className=formType==="deposit"?"active buy":"";
+  $("#segWd").className=formType==="withdrawal"?"active sell":"";
+  const cashT=CASH_TYPES.includes(formType), div=formType==="dividend"||cashT;
+  $("#fTickerField").style.display=cashT?"none":"";
+  $("#fAmountLabel").textContent=formType==="deposit"?"Amount deposited":formType==="withdrawal"?"Amount withdrawn (transfers out, payments)":"Amount received (cash, after any withholding)";
   document.querySelectorAll("#modal .trade-only").forEach(e=>e.style.display=div?"none":"");
   document.querySelectorAll("#modal .div-only").forEach(e=>e.style.display=div?"":"none");
 }
@@ -569,6 +600,12 @@ function fillClass(){const t=$("#fTicker").value.trim().toUpperCase();$("#fClass
 function saveTx(){
   const ticker=$("#fTicker").value.trim().toUpperCase();
   const date=$("#fDate").value||new Date().toISOString().slice(0,10);
+  if(CASH_TYPES.includes(formType)){
+    const amount=parseFloat($("#fAmount").value);
+    if(isNaN(amount)||amount<=0){toast("Fill the amount");return;}
+    state.tx.push({id:uid(),_seq:state.tx.length,date,type:formType,amount});
+    save();closeModal();render();toast(formType==="deposit"?"Deposit logged":"Withdrawal logged");return;
+  }
   if(formType==="dividend"){
     const amount=parseFloat($("#fAmount").value);
     if(!ticker||isNaN(amount)||amount<=0){toast("Fill ticker and amount");return;}
@@ -675,6 +712,8 @@ $("#segBuy").onclick=()=>{formType="buy";setSeg();};
 $("#segSell").onclick=()=>{formType="sell";setSeg();};
 $("#pieChart").addEventListener("mouseleave",()=>setFocus(null));
 $("#segDiv").onclick=()=>{formType="dividend";setSeg();};
+$("#segDep").onclick=()=>{formType="deposit";setSeg();};
+$("#segWd").onclick=()=>{formType="withdrawal";setSeg();};
 $("#fTicker").addEventListener("input",fillClass);
 $("#liveBtn").onclick=refreshPrices;
 $("#snapBtn").onclick=()=>snapshot(false);

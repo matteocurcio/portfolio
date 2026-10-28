@@ -20,6 +20,9 @@
     --c-ink:#ededed; --c-sub:#a0a0a0; --c-faint:#707070;
     --c-green:#3ecf8e; --c-green-dim:#006239; --c-danger:#f87171;
     --c-shadow:rgba(0,0,0,.45);
+    /* asset-class hues (allocation chart only): one hue per class, holdings in a class step its opacity */
+    --c-cls-au:#e07a5f; --c-cls-us:#5b8def; --c-cls-intl:#2bb3c0; --c-cls-em:#a78bfa;
+    --c-cls-bond:#94a3b8; --c-cls-gold:#e6b422; --c-cls-other:#707070;
   }
   html.theme-light{
     --c-bg:#f7f7f6; --c-panel:#ffffff; --c-panel2:#f0f0ef;
@@ -27,6 +30,8 @@
     --c-ink:#1a1a1a; --c-sub:#5a5a58; --c-faint:#8a8a87;
     --c-green:#16a34a; --c-green-dim:#bbf7d0; --c-danger:#dc2626;
     --c-shadow:rgba(0,0,0,.16);
+    --c-cls-au:#d1603f; --c-cls-us:#2f6fe0; --c-cls-intl:#0e8f9c; --c-cls-em:#7c5cdb;
+    --c-cls-bond:#64748b; --c-cls-gold:#b8860b; --c-cls-other:#8a8a87;
   }
   :root{
     --sans:"Inter",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
@@ -83,6 +88,9 @@
   .pill{display:inline-block;padding:2px 9px;border-radius:20px;font-size:11px;font-weight:600}
   .pill.buy{background:rgba(39,192,138,.15);color:var(--green)}
   .pill.sell{background:rgba(255,92,108,.15);color:var(--red)}
+  .pill.dividend{background:var(--c-panel2);color:var(--c-ink);border:1px solid var(--c-border-strong)}
+  .cdot{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:6px;vertical-align:1px}
+  .cls{font-size:11px;color:var(--muted)}
   .priceinp{width:88px;background:var(--panel2);border:1px solid var(--c-border-strong);color:var(--txt);font-family:var(--mono);border-radius:7px;
     padding:6px 8px;text-align:right;font-size:13px}
   .priceinp:focus{outline:none;border-color:var(--accent)}
@@ -143,7 +151,7 @@
   <div class="cards">
     <div class="card"><div class="label">Market value</div><div class="value" id="cMV">—</div><div class="sub muted" id="cMVsub">invested cost</div></div>
     <div class="card"><div class="label">Unrealized P&L</div><div class="value" id="cUPL">—</div><div class="sub" id="cUPLsub"></div></div>
-    <div class="card"><div class="label">Realized P&L</div><div class="value" id="cRPL">—</div><div class="sub muted">from closed lots</div></div>
+    <div class="card"><div class="label">Realized & income</div><div class="value" id="cRPL">—</div><div class="sub muted" id="cRPLsub">from closed lots</div></div>
     <div class="card"><div class="label">Total return</div><div class="value" id="cTOT">—</div><div class="sub" id="cTOTsub"></div></div>
   </div>
 
@@ -176,17 +184,22 @@
     <div class="seg" style="margin-bottom:16px">
       <button id="segBuy" class="active buy" data-type="buy">Buy</button>
       <button id="segSell" data-type="sell">Sell</button>
+      <button id="segDiv" data-type="dividend">Dividend</button>
     </div>
     <div class="row2">
       <div class="field"><label>Ticker</label><input id="fTicker" placeholder="AAPL" autocomplete="off"></div>
       <div class="field"><label>Date</label><input id="fDate" type="date"></div>
     </div>
-    <div class="field"><label>Name (optional)</label><input id="fName" placeholder="Apple Inc." autocomplete="off"></div>
-    <div class="row2">
+    <div class="row2 trade-only">
+      <div class="field"><label>Name (optional)</label><input id="fName" placeholder="Apple Inc." autocomplete="off"></div>
+      <div class="field"><label>Asset class</label><select id="fClass"></select></div>
+    </div>
+    <div class="row2 trade-only">
       <div class="field"><label>Shares / Qty</label><input id="fShares" type="number" step="any" placeholder="10"></div>
       <div class="field"><label>Price per share</label><input id="fPrice" type="number" step="any" placeholder="150.00"></div>
     </div>
-    <div class="field"><label>Fees (optional)</label><input id="fFees" type="number" step="any" placeholder="0.00"></div>
+    <div class="field trade-only"><label>Fees (optional)</label><input id="fFees" type="number" step="any" placeholder="0.00"></div>
+    <div class="field div-only" style="display:none"><label>Amount received (cash, after any withholding)</label><input id="fAmount" type="number" step="any" placeholder="29.11"></div>
     <div class="modal-actions">
       <button class="btn" id="cancelBtn">Cancel</button>
       <button class="btn primary" id="saveBtn">Save</button>
@@ -207,6 +220,19 @@ const FX_SYM = {USD:"AUDUSD=X",GBP:"AUDGBP=X",EUR:"AUDEUR=X"};
 function rate(){if(state.currency===BASE)return 1;
   return (state.fxRates&&state.fxRates[state.currency])||1;}
 
+
+// Asset classes: each has its own hue (tokens --c-cls-*). A ticker's class is state.classes[t],
+// else the default below, else "other". Set it in the Add transaction box.
+const CLASSES=[["au","Australian equity"],["us","US equity"],["intl","Developed ex-US"],["em","Emerging markets"],
+  ["bond","Bonds"],["gold","Gold & commodities"],["other","Other"]];
+const DEFAULT_CLASS={"A200.AX":"au","IVV.AX":"us","EXUS.AX":"intl","VGE.AX":"em",
+  "ILB.AX":"bond","VGB.AX":"bond","VBND.AX":"bond","GXLD.AX":"gold"};
+function classOf(t){return (state.classes&&state.classes[t])||DEFAULT_CLASS[t]||"other";}
+function classLabel(c){return (CLASSES.find(x=>x[0]===c)||[c,c])[1];}
+function classColor(c,alpha=1){
+  const h=getComputedStyle(document.documentElement).getPropertyValue("--c-cls-"+c).trim()||"#707070";
+  const v=h.replace("#","");const [r,g,b]=[0,2,4].map(i=>parseInt(v.slice(i,i+2),16));
+  return alpha===1?h:`rgba(${r},${g},${b},${alpha})`;}
 
 let state = load();
 let editingId = null, formType = "buy", sortHold = {key:"value",dir:-1};
@@ -286,7 +312,9 @@ function compute(){
   const byTicker={};
   const txs=[...state.tx].sort((a,b)=>a.date.localeCompare(b.date)||a._seq-b._seq);
   let realized=0;
+  let dividends=0;
   for(const t of txs){
+    if(t.type==="dividend"){dividends+=+t.amount||0;continue;}
     const k=t.ticker;
     if(!byTicker[k]) byTicker[k]={ticker:k,shares:0,cost:0};
     const h=byTicker[k];
@@ -304,12 +332,12 @@ function compute(){
     const price=state.prices[h.ticker]!=null?+state.prices[h.ticker]:avg;
     const mv=h.shares*price;
     const upl=mv-h.cost;
-    return {...h,avg,price,mv,upl,uplPct:h.cost?upl/h.cost*100:0,name:state.names[h.ticker]||""};
+    return {...h,avg,price,mv,upl,uplPct:h.cost?upl/h.cost*100:0,name:state.names[h.ticker]||"",cls:classOf(h.ticker)};
   });
   const mv=holdings.reduce((s,h)=>s+h.mv,0);
   const cost=holdings.reduce((s,h)=>s+h.cost,0);
   const upl=mv-cost;
-  return {holdings,mv,cost,upl,uplPct:cost?upl/cost*100:0,realized};
+  return {holdings,mv,cost,upl,uplPct:cost?upl/cost*100:0,realized,dividends};
 }
 
 
@@ -340,7 +368,7 @@ function dailySeries(){
     return (c==="GBp"?v/100:v)*r;};
   const h={}; let ti=0; const out=[];
   for(const d of dates){
-    while(ti<txs.length&&txs[ti].date<=d){const t=txs[ti++],k=t.ticker,q=+t.shares,p=+t.price,f=+t.fees||0;
+    while(ti<txs.length&&txs[ti].date<=d){const t=txs[ti++];if(t.type==="dividend")continue;const k=t.ticker,q=+t.shares,p=+t.price,f=+t.fees||0;
       h[k]=h[k]||{shares:0,cost:0,px:p};
       if(t.type==="buy"){h[k].shares+=q;h[k].cost+=q*p+f;}
       else{const avg=h[k].shares>0?h[k].cost/h[k].shares:0;h[k].cost-=avg*q;h[k].shares-=q;if(h[k].shares<1e-9){h[k].shares=0;h[k].cost=0;}}
@@ -367,8 +395,10 @@ function render(){
   $("#cMVsub").textContent="cost "+fmt(r.cost);
   $("#cUPL").textContent=sign(r.upl); $("#cUPL").className="value "+cls(r.upl);
   $("#cUPLsub").textContent=pct(r.uplPct); $("#cUPLsub").className="sub "+cls(r.upl);
-  $("#cRPL").textContent=sign(r.realized); $("#cRPL").className="value "+cls(r.realized);
-  const tot=r.upl+r.realized;
+  const inc=r.realized+r.dividends;
+  $("#cRPL").textContent=sign(inc); $("#cRPL").className="value "+cls(inc);
+  $("#cRPLsub").textContent=!r.dividends?"from closed lots":(Math.abs(r.realized)<0.005?"dividends":"dividends "+fmt(r.dividends)+" · sales "+sign(r.realized));
+  const tot=r.upl+inc;
   $("#cTOT").textContent=sign(tot); $("#cTOT").className="value "+cls(tot);
   const totPct=r.cost?(tot/r.cost*100):0;
   $("#cTOTsub").textContent=pct(totPct)+" on cost"; $("#cTOTsub").className="sub "+cls(tot);
@@ -391,13 +421,13 @@ function renderHoldings(r){
   for(const x of sorted){
     const wt=r.mv?x.mv/r.mv*100:0;
     h+=`<tr>
-      <td class="l"><span class="tk">${x.ticker}</span>${x.name?`<div class="nm">${x.name}</div>`:""}</td>
+      <td class="l"><span class="cdot" style="background:${classColor(x.cls)}"></span><span class="tk">${x.ticker}</span>${x.name?`<div class="nm">${x.name}</div>`:""}<div class="cls">${classLabel(x.cls)}</div></td>
       <td>${fmtNum(x.shares)}</td>
       <td>${fmt(x.avg)}</td>
       <td><input class="priceinp" data-ticker="${x.ticker}" value="${x.price.toFixed(2)}"></td>
       <td><b>${fmt(x.mv)}</b></td>
       <td class="${cls(x.upl)}">${sign(x.upl)}<div class="nm ${cls(x.upl)}">${pct(x.uplPct)}</div></td>
-      <td>${wt.toFixed(1)}%<div class="bar"><span style="width:${wt}%"></span></div></td>
+      <td>${wt.toFixed(1)}%<div class="bar"><span style="width:${wt}%;background:${classColor(x.cls)}"></span></div></td>
     </tr>`;
   }
   h+="</tbody></table>";
@@ -417,13 +447,14 @@ function renderTx(){
   let h=`<table><thead><tr><th class="l">Date</th><th class="l">Type</th><th class="l">Asset</th>
     <th>Qty</th><th>Price</th><th>Fees</th><th>Total</th><th></th></tr></thead><tbody>`;
   for(const t of txs){
-    const total=t.shares*t.price+(t.type==="buy"?1:-1)*(+t.fees||0);
+    const div=t.type==="dividend";
+    const total=div?(+t.amount||0):t.shares*t.price+(t.type==="buy"?1:-1)*(+t.fees||0);
     h+=`<tr>
       <td class="l">${t.date}</td>
       <td class="l"><span class="pill ${t.type}">${t.type.toUpperCase()}</span></td>
       <td class="l"><span class="tk">${t.ticker}</span></td>
-      <td>${fmtNum(t.shares)}</td><td>${fmt(t.price)}</td><td>${fmt(+t.fees||0)}</td>
-      <td><b>${fmt(total)}</b></td>
+      <td>${div?"—":fmtNum(t.shares)}</td><td>${div?"—":fmt(t.price)}</td><td>${div?"—":fmt(+t.fees||0)}</td>
+      <td><b>${div?"+"+fmt(total):fmt(total)}</b></td>
       <td><span class="del" data-id="${t.id}" title="Delete">✕</span></td>
     </tr>`;
   }
@@ -437,23 +468,24 @@ function renderCharts(r){
   // Charts read the design tokens rather than hardcoding colour, so they
   // follow the theme. One accent, stepped — not ten unrelated hues.
   const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
-  const rgb = h => { h=h.replace('#',''); if(h.length===3) h=[...h].map(c=>c+c).join('');
-                     return [0,2,4].map(i=>parseInt(h.slice(i,i+2),16)); };
-  function palette(n){
-    const [r,g,b] = rgb(css('--c-green'));
-    const [sr,sg,sb] = rgb(css('--c-sub'));
-    return Array.from({length:n},(_,i)=>{
-      if(i < 6) return `rgba(${r},${g},${b},${(1 - i*0.145).toFixed(3)})`;
-      return `rgba(${sr},${sg},${sb},${(0.85 - (i-6)*0.15).toFixed(3)})`;   // neutral tail
-    });
-  }
   // pie
   const pc=$("#pieChart").getContext("2d");
-  const labels=r.holdings.map(h=>h.ticker), data=r.holdings.map(h=>+h.mv.toFixed(2));
+  // Slices grouped by asset class; each class has its own hue, holdings within it step the opacity.
+  const order=CLASSES.map(c=>c[0]);
+  const hs=[...r.holdings].sort((a,b)=>order.indexOf(a.cls)-order.indexOf(b.cls)||b.mv-a.mv);
+  const seen={}, STEPS=[1,.68,.42,.25];
+  const colors=hs.map(h=>{const i=seen[h.cls]=(seen[h.cls]??-1)+1;return classColor(h.cls,STEPS[Math.min(i,STEPS.length-1)]);});
+  const labels=hs.map(h=>h.ticker), data=hs.map(h=>+h.mv.toFixed(2));
+  const clsPct={};hs.forEach(h=>clsPct[h.cls]=(clsPct[h.cls]||0)+h.mv/r.mv*100);
   if(pieChart)pieChart.destroy();
-  if(r.holdings.length){
-    pieChart=new Chart(pc,{type:"doughnut",data:{labels,datasets:[{data,backgroundColor:palette(data.length),borderColor:css("--c-panel"),borderWidth:2}]},
-      options:{plugins:{legend:{position:"right",labels:{color:css("--c-ink"),boxWidth:12,font:{size:12}}}},cutout:"62%"}});
+  if(hs.length){
+    pieChart=new Chart(pc,{type:"doughnut",data:{labels,datasets:[{data,backgroundColor:colors,borderColor:css("--c-panel"),borderWidth:2}]},
+      options:{cutout:"62%",plugins:{
+        legend:{position:"right",labels:{color:css("--c-ink"),boxWidth:12,font:{size:12},
+          generateLabels:ch=>hs.map((h,i)=>({text:h.ticker+"  "+classLabel(h.cls),fillStyle:colors[i],strokeStyle:colors[i],
+            fontColor:css("--c-ink"),index:i,hidden:!ch.getDataVisibility(i)}))}},
+        tooltip:{callbacks:{label:c=>{const h=hs[c.dataIndex];
+          return [h.ticker+" · "+fmt(h.mv)+" ("+(h.mv/r.mv*100).toFixed(1)+"%)", classLabel(h.cls)+" "+clsPct[h.cls].toFixed(1)+"% of portfolio"];}}}}}});
   }
   // line
   const lc=$("#lineChart").getContext("2d");
@@ -489,7 +521,8 @@ function snapshot(silent){
 function openModal(){
   editingId=null;formType="buy";setSeg();
   $("#modalTitle").textContent="Add transaction";
-  $("#fTicker").value="";$("#fName").value="";$("#fShares").value="";$("#fPrice").value="";$("#fFees").value="";
+  $("#fTicker").value="";$("#fName").value="";$("#fShares").value="";$("#fPrice").value="";$("#fFees").value="";$("#fAmount").value="";
+  $("#fClass").innerHTML=CLASSES.map(c=>`<option value="${c[0]}">${c[1]}</option>`).join("");fillClass();
   $("#fDate").value=new Date().toISOString().slice(0,10);
   $("#modal").classList.add("show");$("#fTicker").focus();
 }
@@ -497,9 +530,23 @@ function closeModal(){$("#modal").classList.remove("show");}
 function setSeg(){
   $("#segBuy").className=formType==="buy"?"active buy":"";
   $("#segSell").className=formType==="sell"?"active sell":"";
+  $("#segDiv").className=formType==="dividend"?"active buy":"";
+  const div=formType==="dividend";
+  document.querySelectorAll("#modal .trade-only").forEach(e=>e.style.display=div?"none":"");
+  document.querySelectorAll("#modal .div-only").forEach(e=>e.style.display=div?"":"none");
 }
+function fillClass(){const t=$("#fTicker").value.trim().toUpperCase();$("#fClass").value=classOf(t);}
 function saveTx(){
   const ticker=$("#fTicker").value.trim().toUpperCase();
+  const date=$("#fDate").value||new Date().toISOString().slice(0,10);
+  if(formType==="dividend"){
+    const amount=parseFloat($("#fAmount").value);
+    if(!ticker||isNaN(amount)||amount<=0){toast("Fill ticker and amount");return;}
+    state.tx.push({id:uid(),_seq:state.tx.length,date,type:"dividend",ticker,amount});
+    save();closeModal();render();toast("Dividend logged");return;
+  }
+  const cl=$("#fClass").value;
+  if(cl&&cl!==classOf(ticker)){state.classes=state.classes||{};state.classes[ticker]=cl;}
   const shares=parseFloat($("#fShares").value);
   const price=parseFloat($("#fPrice").value);
   if(!ticker||isNaN(shares)||shares<=0||isNaN(price)||price<0){toast("Fill ticker, qty and price");return;}
@@ -581,7 +628,7 @@ function exportData(){
 function importData(file){
   const fr=new FileReader();
   fr.onload=()=>{try{const d=JSON.parse(fr.result);
-    if(!d.tx)throw 0;state=normalise({tx:d.tx,prices:d.prices||{},names:d.names||{},snapshots:d.snapshots||[],currency:d.currency||BASE});
+    if(!d.tx)throw 0;state=normalise({tx:d.tx,prices:d.prices||{},names:d.names||{},snapshots:d.snapshots||[],currency:d.currency||BASE,classes:d.classes||{}});
     save();render();loadHistory();toast("Imported");}catch(e){toast("Invalid file");}};
   fr.readAsText(file);
 }
@@ -596,6 +643,8 @@ $("#cancelBtn").onclick=closeModal;
 $("#saveBtn").onclick=saveTx;
 $("#segBuy").onclick=()=>{formType="buy";setSeg();};
 $("#segSell").onclick=()=>{formType="sell";setSeg();};
+$("#segDiv").onclick=()=>{formType="dividend";setSeg();};
+$("#fTicker").addEventListener("input",fillClass);
 $("#liveBtn").onclick=refreshPrices;
 $("#snapBtn").onclick=()=>snapshot(false);
 $("#exportBtn").onclick=exportData;

@@ -26,3 +26,18 @@ CREATE TABLE IF NOT EXISTS portfolio_archive (
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   created_by TEXT NOT NULL DEFAULT ''
 );
+-- Daily closes, fetched once and kept. portfolio_price_sync records how far each symbol has been
+-- fetched, so weekends and holidays (no bar) are not asked for again.
+CREATE TABLE IF NOT EXISTS portfolio_prices (
+  symbol TEXT NOT NULL,
+  date   TEXT NOT NULL,
+  close  REAL NOT NULL,
+  PRIMARY KEY (symbol, date)
+);
+CREATE TABLE IF NOT EXISTS portfolio_price_sync (
+  symbol     TEXT PRIMARY KEY,
+  from_date  TEXT NOT NULL,
+  through    TEXT NOT NULL,
+  currency   TEXT,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);

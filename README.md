@@ -30,6 +30,8 @@ Runs at [portfolio.matteocurcio.com](https://portfolio.matteocurcio.com).
 ## Endpoints
 
 - `GET /api/quote?symbol=X` or `?symbols=X,Y` — live prices from Yahoo Finance, cached 60 s, max 50 symbols.
+- `GET /api/history?from=YYYY-MM-DD&symbols=A,B` — daily closes since `from`. Closes are kept in D1; Yahoo is
+  only asked for days not stored yet (plus FX to AUD for holdings quoted in another currency).
 - `GET /api/state` — `{ doc, version }`; `doc` is null until the first save.
 - `GET|POST /api/archive` — list or add a reference copy (`{ label, note, doc }`).
 - `PUT /api/state` with `{ version, doc }` — saves when `version` is still current, otherwise
@@ -42,6 +44,9 @@ Data lives in D1 `app-data` (shared with bill, expenses, recipes, scripts and sh
 - `portfolio_state` — one row, the whole portfolio as JSON, with a version number.
 - `portfolio_archive` — old exports kept for reference, never live: the EUR-based history from before the
   AUD rebase (`portfolio-2026-06-12.json`). `GET /api/archive` lists them, `?id=N` returns one.
+- `portfolio_prices` / `portfolio_price_sync` — daily closes per symbol and how far each has been fetched.
+  The chart rebuilds value and cost for every trading day from the trades plus these closes, so
+  editing or back-dating a trade redraws the past; only the prices are stored, not the totals.
 - `portfolio_history` — previous versions, for undoing a bad edit:
   `SELECT version, saved_at FROM portfolio_history ORDER BY id DESC LIMIT 20;`
 

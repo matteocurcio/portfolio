@@ -312,6 +312,49 @@ function compute(){
   return {holdings,mv,cost,upl,uplPct:cost?upl/cost*100:0,realized};
 }
 
+
+// ---- daily value history: closes come from /api/history (cached in D1, only missing days fetched) ----
+let hist=null; // {closes:{SYM:[[date,close]]}, currency:{SYM:"AUD"}}
+async function loadHistory(){
+  if(!state.tx.length){hist=null;return;}
+  const syms=[...new Set(state.tx.map(t=>t.ticker))].sort();
+  const from=state.tx.map(t=>t.date).sort()[0];
+  try{
+    const r=await fetch("/api/history?from="+from+"&symbols="+encodeURIComponent(syms.join(",")),{cache:"no-store",redirect:"manual"});
+    if(!r.ok)return;
+    hist=await r.json();renderCharts(compute());
+  }catch(e){}
+}
+// Value and cost at the close of every trading day since the first trade, from the trades as they are now,
+// so editing or back-dating a trade redraws the past correctly. Today is the live value.
+function dailySeries(){
+  if(!hist||!hist.closes)return [];
+  const txs=[...state.tx].sort((a,b)=>a.date.localeCompare(b.date)||a._seq-b._seq);
+  if(!txs.length)return [];
+  const first=txs[0].date, today=new Date().toLocaleDateString("en-CA");
+  const dates=[...new Set(Object.values(hist.closes).flat().map(c=>c[0]))].filter(d=>d>=first&&d<today).sort();
+  const idx={}, last={};            // per symbol: position in its close list, last close seen
+  const fxSym=c=>(c==="GBp"?"GBP":c)+"AUD=X";
+  const toAud=(sym,v)=>{const c=hist.currency&&hist.currency[sym];
+    if(!c||c==="AUD")return v; const k=fxSym(c); const r=last[k]; if(r==null)return null;
+    return (c==="GBp"?v/100:v)*r;};
+  const h={}; let ti=0; const out=[];
+  for(const d of dates){
+    while(ti<txs.length&&txs[ti].date<=d){const t=txs[ti++],k=t.ticker,q=+t.shares,p=+t.price,f=+t.fees||0;
+      h[k]=h[k]||{shares:0,cost:0,px:p};
+      if(t.type==="buy"){h[k].shares+=q;h[k].cost+=q*p+f;}
+      else{const avg=h[k].shares>0?h[k].cost/h[k].shares:0;h[k].cost-=avg*q;h[k].shares-=q;if(h[k].shares<1e-9){h[k].shares=0;h[k].cost=0;}}
+      h[k].px=p;}
+    for(const [sym,list] of Object.entries(hist.closes)){let i=idx[sym]||0;
+      while(i<list.length&&list[i][0]<=d){last[sym]=list[i][1];i++;} idx[sym]=i;}
+    let value=0,cost=0;
+    for(const [k,x] of Object.entries(h)){if(!x.shares)continue;cost+=x.cost;
+      const c=last[k]!=null?toAud(k,last[k]):null; value+=x.shares*(c!=null?c:x.px);}
+    out.push({date:d,value,cost});
+  }
+  const r=compute(); out.push({date:today,value:r.mv,cost:r.cost});
+  return out;
+}
 // ---- render ----
 let lineChart,pieChart;
 function render(){
@@ -414,19 +457,22 @@ function renderCharts(r){
   }
   // line
   const lc=$("#lineChart").getContext("2d");
-  const snaps=[...state.snapshots].sort((a,b)=>a.date.localeCompare(b.date));
+  const series=dailySeries();
+  const snaps=series.length>1?series:[...state.snapshots].sort((a,b)=>a.date.localeCompare(b.date));
   if(lineChart)lineChart.destroy();
   const grad=lc.createLinearGradient(0,0,0,200);
   grad.addColorStop(0,"rgba(91,140,255,.35)");grad.addColorStop(1,"rgba(91,140,255,0)");
   lineChart=new Chart(lc,{type:"line",data:{labels:snaps.map(s=>s.date),
     datasets:[{label:"Value",data:snaps.map(s=>+(s.value*rate()).toFixed(2)),borderColor:css("--c-green"),backgroundColor:grad,
-      fill:true,tension:.3,pointRadius:snaps.length<30?3:0,pointBackgroundColor:css("--c-green")}]},
-    options:{plugins:{legend:{display:false}},
+      fill:true,tension:.3,pointRadius:snaps.length<30?3:0,pointBackgroundColor:css("--c-green")},
+      ...(series.length>1?[{label:"Cost",data:series.map(s=>+(s.cost*rate()).toFixed(2)),borderColor:css("--c-sub"),
+        borderDash:[4,4],borderWidth:1,pointRadius:0,fill:false,tension:0}]:[])]},
+    options:{plugins:{legend:{display:false},tooltip:{mode:"index",intersect:false}},interaction:{mode:"index",intersect:false},
       scales:{x:{ticks:{color:css("--c-sub"),maxTicksLimit:7},grid:{color:css("--c-border")}},
         y:{ticks:{color:css("--c-sub"),callback:v=>(CCY[state.currency]||CCY[BASE])+v.toLocaleString()},grid:{color:css("--c-border")}}}}});
   if(!snaps.length){
     lc.fillStyle=css("--c-sub");lc.font='13px "JetBrains Mono",monospace';lc.textAlign="center";
-    lc.fillText("Click ＋ Snapshot to start tracking value over time",lc.canvas.width/2/2,80);
+    lc.fillText("Add a transaction to start tracking value over time",lc.canvas.width/2/2,80);
   }
 }
 
@@ -461,7 +507,7 @@ function saveTx(){
   if(name)state.names[ticker]=name;
   state.tx.push({id:uid(),_seq:state.tx.length,date:$("#fDate").value||new Date().toISOString().slice(0,10),
     type:formType,ticker,shares,price,fees:parseFloat($("#fFees").value)||0});
-  save();closeModal();snapshot(true);render();toast(formType==="buy"?"Buy logged":"Sell logged");
+  save();closeModal();snapshot(true);render();loadHistory();toast(formType==="buy"?"Buy logged":"Sell logged");
 }
 
 // ---- live prices (Yahoo v8 chart via CORS-proxy fallback) ----
@@ -536,7 +582,7 @@ function importData(file){
   const fr=new FileReader();
   fr.onload=()=>{try{const d=JSON.parse(fr.result);
     if(!d.tx)throw 0;state=normalise({tx:d.tx,prices:d.prices||{},names:d.names||{},snapshots:d.snapshots||[],currency:d.currency||BASE});
-    save();render();toast("Imported");}catch(e){toast("Invalid file");}};
+    save();render();loadHistory();toast("Imported");}catch(e){toast("Invalid file");}};
   fr.readAsText(file);
 }
 
@@ -563,7 +609,7 @@ document.addEventListener("keydown",e=>{if(e.key==="Escape")closeModal();
   if(e.key==="Enter"&&$("#modal").classList.contains("show"))saveTx();});
 
 render();
-pull();
+pull().then(loadHistory);
 window.addEventListener("online",()=>{if(dirty)push();});
 </script>
 </body>

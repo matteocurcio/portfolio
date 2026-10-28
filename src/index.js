@@ -4,6 +4,7 @@
  *   /                 the page (site/index.html, bundled as text)
  *   /api/quote        live prices from Yahoo Finance, server-side (no CORS, no public proxies)
  *   /api/state        GET / PUT the portfolio document, stored in D1 (shared app-data database)
+ *   /api/history      daily closes per symbol since a date; only days not yet in D1 are fetched
  *   /api/archive      GET lists archived documents (old exports kept for reference), POST adds one
  *
  * Every request, the page included, passes the Cloudflare Access check first and fails closed
@@ -20,6 +21,8 @@ const MAX_DOC_BYTES = 2_000_000;
 const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS portfolio_state (id INTEGER PRIMARY KEY CHECK (id = 1), doc TEXT NOT NULL, version INTEGER NOT NULL, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_by TEXT NOT NULL DEFAULT '')`,
   `CREATE TABLE IF NOT EXISTS portfolio_history (id INTEGER PRIMARY KEY AUTOINCREMENT, version INTEGER NOT NULL, doc TEXT NOT NULL, saved_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, saved_by TEXT NOT NULL DEFAULT '')`,
+  `CREATE TABLE IF NOT EXISTS portfolio_prices (symbol TEXT NOT NULL, date TEXT NOT NULL, close REAL NOT NULL, PRIMARY KEY (symbol, date))`,
+  `CREATE TABLE IF NOT EXISTS portfolio_price_sync (symbol TEXT PRIMARY KEY, from_date TEXT NOT NULL, through TEXT NOT NULL, currency TEXT, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
   `CREATE TABLE IF NOT EXISTS portfolio_archive (id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT NOT NULL UNIQUE, doc TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, created_by TEXT NOT NULL DEFAULT '')`,
 ];
 let schemaReady = false;
@@ -119,6 +122,80 @@ async function putState(request, env, email) {
   return json({ ok: true, version: next });
 }
 
+
+// ---------- daily history: closes cached in D1, only missing days fetched ----------
+const DAY = 86400;
+const ymd = (sec) => new Date(sec * 1000).toISOString().slice(0, 10);
+const addDays = (d, n) => ymd(Date.parse(d + "T00:00:00Z") / 1000 + n * DAY);
+
+// Daily bars from Yahoo between two dates (inclusive), dated in the exchange's own timezone.
+// Only bars before the exchange's "today" are returned: today's bar is not a close yet.
+async function fetchCloses(symbol, from) {
+  const p1 = Math.floor(Date.parse(from + "T00:00:00Z") / 1000) - DAY; // a day early covers timezones ahead of UTC
+  const p2 = Math.floor(Date.now() / 1000);
+  const url = `${YF}${encodeURIComponent(symbol)}?interval=1d&period1=${p1}&period2=${p2}`;
+  const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0", Accept: "application/json" } });
+  if (!res.ok) throw new Error("yahoo " + res.status);
+  const j = await res.json();
+  const r = j?.chart?.result?.[0];
+  if (!r) throw new Error("no data");
+  const off = r.meta?.gmtoffset || 0;
+  const today = ymd(p2 + off);
+  const ts = r.timestamp || [];
+  const close = r.indicators?.quote?.[0]?.close || [];
+  const rows = [];
+  ts.forEach((t, i) => {
+    const d = ymd(t + off), c = close[i];
+    if (d >= from && d < today && typeof c === "number" && isFinite(c)) rows.push([d, c]);
+  });
+  return { rows, currency: r.meta?.currency || null, through: addDays(today, -1) };
+}
+
+async function syncSymbol(db, symbol, from) {
+  const sync = await db.prepare("SELECT from_date, through, currency FROM portfolio_price_sync WHERE symbol = ?1").bind(symbol).first();
+  const yesterdayUtc = addDays(ymd(Date.now() / 1000), -1);
+  let start = null;
+  if (!sync || from < sync.from_date) start = from;                // never fetched, or an earlier trade was added
+  else if (sync.through < yesterdayUtc) start = addDays(sync.through, 1); // days missing since the last fetch
+  if (!start) return { currency: sync.currency, fetched: 0 };
+  const { rows, currency, through } = await fetchCloses(symbol, start);
+  const stmts = rows.map(([d, c]) =>
+    db.prepare("INSERT OR REPLACE INTO portfolio_prices (symbol, date, close) VALUES (?1, ?2, ?3)").bind(symbol, d, c));
+  stmts.push(db.prepare(
+    `INSERT INTO portfolio_price_sync (symbol, from_date, through, currency, updated_at) VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)
+     ON CONFLICT (symbol) DO UPDATE SET from_date = min(from_date, excluded.from_date), through = excluded.through,
+       currency = excluded.currency, updated_at = CURRENT_TIMESTAMP`).bind(symbol, sync ? (from < sync.from_date ? from : sync.from_date) : from, through, currency));
+  await db.batch(stmts);
+  return { currency, fetched: rows.length };
+}
+
+async function history(env, url) {
+  await ensureSchema(env.DB);
+  const from = url.searchParams.get("from") || "";
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(from)) return json({ error: "from=YYYY-MM-DD required" }, 400);
+  const syms = (url.searchParams.get("symbols") || "").split(",").map((s) => s.trim()).filter(Boolean).slice(0, 30);
+  if (!syms.length) return json({ error: "symbols required" }, 400);
+
+  const currency = {}, errors = {}, fetched = {};
+  const run = async (s) => {
+    try { const r = await syncSymbol(env.DB, s, from); currency[s] = r.currency; if (r.fetched) fetched[s] = r.fetched; }
+    catch (e) { errors[s] = String(e.message || e); }
+  };
+  await Promise.all(syms.map(run));
+  // Holdings quoted in another currency also need that currency's daily rate to AUD.
+  const fx = [...new Set(Object.values(currency).filter((c) => c && c !== "AUD").map((c) => (c === "GBp" ? "GBP" : c)))]
+    .map((c) => `${c}AUD=X`);
+  await Promise.all(fx.map(run));
+
+  const all = [...syms, ...fx];
+  const { results } = await env.DB.prepare(
+    `SELECT symbol, date, close FROM portfolio_prices WHERE date >= ?1 AND symbol IN (${all.map((_, i) => "?" + (i + 2)).join(",")}) ORDER BY date`)
+    .bind(from, ...all).all();
+  const closes = {};
+  for (const r of results) (closes[r.symbol] ||= []).push([r.date, r.close]);
+  return json({ closes, currency, fetched, errors });
+}
+
 // ---------- archive: old documents kept for reference, never loaded as live data ----------
 async function archive(request, env, email) {
   await ensureSchema(env.DB);
@@ -157,6 +234,7 @@ export default {
         if (request.method === "PUT") return await putState(request, env, auth.email);
         return json({ error: "method not allowed" }, 405, { Allow: "GET, PUT" });
       }
+      if (pathname === "/api/history") return await history(env, url);
       if (pathname === "/api/archive") return await archive(request, env, auth.email);
       if (pathname.startsWith("/api/")) return json({ error: "not found" }, 404);
       if (request.method !== "GET" && request.method !== "HEAD") return json({ error: "method not allowed" }, 405);
